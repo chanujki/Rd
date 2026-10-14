@@ -90,6 +90,9 @@ let pc = null, localStream = null, screenStream = null, currentCall = null, inco
 let incomingSeen = new Set(), callTimerId = null, callStart = 0, facing = "user", ringTimer = null;
 let searchTimer = null, actx = null, pmPhoto = null;
 let recorder = null, recChunks = [], recStart = 0, recTimer = null;
+let chatSearchQ = "";
+const prefs = () => JSON.parse(localStorage.getItem("rikuu_prefs") || "{}");
+const setPref = (kind, uid, val) => { const p = prefs(); p[kind] = p[kind] || {}; if (val) p[kind][uid] = true; else delete p[kind][uid]; localStorage.setItem("rikuu_prefs", JSON.stringify(p)); };
 
 function listen(ref, ev, fn) { ref.on(ev, fn); subs.push(() => ref.off(ev, fn)); }
 function clearSubs() { subs.forEach(f => f()); subs = []; }
@@ -111,12 +114,13 @@ function tone(freqs, dur = 0.13, gap = 0.15) {
     });
   } catch (_) {}
 }
-const playMsgSound = () => tone([880, 1175]);
+const playMsgSound = id => { if (!id || !isMuted(id)) tone([880, 1175]); };
 function startRing() { stopRing(); const r = () => tone([660, 880, 660], 0.14, 0.18); r(); ringTimer = setInterval(r, 2200); }
 function stopRing() { clearInterval(ringTimer); ringTimer = null; }
 
 /* ---------- notifications ---------- */
-function notifyUser(title, body) {
+function notifyUser(title, body, id) {
+  if (id && isMuted(id)) return;
   if (!("Notification" in window) || Notification.permission !== "granted") return;
   try {
     const n = new Notification(title, { body, icon: "icons/rikuu-192.png", tag: "rikuu-" + title });
@@ -332,12 +336,13 @@ function loadRecent() {
   recentRef.on("value", s => {
     const arr = [];
     s.forEach(x => { arr.push({ ...x.val() }); });
-    arr.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    const pins = prefs().pin || {};
+    arr.sort((a, b) => (!!pins[b.uid] - !!pins[a.uid]) || (b.updatedAt || 0) - (a.updatedAt || 0));
     arr.forEach(c => {
       const was = prevUnread[c.uid] || 0, now = c.unread || 0;
-      if (recentReady && now > was && (!active || active.uid !== c.uid)) {
-        playMsgSound();
-        if (document.hidden) notifyUser(c.name || "নতুন মেসেজ", c.lastMessage || "");
+      if (recentReady && now > was && (!active || active.uid !== c.uid) && !(prefs().mute || {})[c.uid]) {
+        playMsgSound(c.uid);
+        if (document.hidden) notifyUser(c.name || "নতুন মেসেজ", c.lastMessage || "", c.uid);
       }
       prevUnread[c.uid] = now;
     });
@@ -365,7 +370,7 @@ function renderRecent() {
     return `<button class="chat-item ${active?.uid === c.uid ? "active" : ""}" data-uid="${esc(c.uid)}">
       ${avatar(c.name, c.uid, false, c.photo)}
       <div class="ci-main">
-        <div class="ci-top"><b>${c.isGroup ? "👥 " : ""}${esc(c.name || "User")}</b><time>${c.updatedAt ? timeOf(c.updatedAt) : ""}</time></div>
+        <div class="ci-top"><b>${prefs().pin?.[c.uid] ? "📌 " : ""}${c.isGroup ? "👥 " : ""}${esc(c.name || "User")}</b><time>${c.updatedAt ? timeOf(c.updatedAt) : ""}</time></div>
         <span class="ci-last">${esc(c.lastMessage || "কথা বলা শুরু করুন")}</span>
       </div>${unread}
     </button>`;
@@ -393,6 +398,7 @@ async function openChat(uid) {
     $("headStatus").textContent = "সংযুক্ত হচ্ছে…";
     $("typing").hidden = true;
     $("audioBtn").hidden = false;
+    refreshHeaderPrefs();
     $("videoBtn").hidden = false;
     watchStatus();
     watchTyping();
@@ -454,6 +460,7 @@ function stopTyping() {
    MESSAGES
    ========================================================================== */
 function listenMessages() {
+  refreshMute();
   const uid = active.uid, key = convKey(), grp = !!active.isGroup;
   cache = {};
   forceScroll = true;
@@ -469,11 +476,11 @@ function listenMessages() {
       if (!grp && !m.deliveredAt) db.ref(`messages/${key}/${s.key}/deliveredAt`).set(SV).catch(() => {});
       if (ready) {
         if (!document.hidden) {
-          playMsgSound();
+          playMsgSound(uid);
           if (!grp) markSeen(key, m);
           clearUnread(uid);
         } else {
-          notifyUser(active?.name || "Rikuu", (grp && m.senderName ? m.senderName + ": " : "") + previewOf(m));
+          notifyUser(active?.name || "Rikuu", (grp && m.senderName ? m.senderName + ": " : "") + previewOf(m), uid);
         }
       }
     }
@@ -511,7 +518,10 @@ function scrollToBottomIfNear() {
 
 function renderMessages() {
   const box = $("messages");
-  const list = Object.values(cache).sort((a, b) => (Number(a.createdAt) || 0) - (Number(b.createdAt) || 0));
+  const q = chatSearchQ.trim().toLowerCase();
+  const list = Object.values(cache)
+    .sort((a, b) => (Number(a.createdAt) || 0) - (Number(b.createdAt) || 0))
+    .filter(m => !q || (m.text || "").toLowerCase().includes(q));
   if (!list.length) {
     box.innerHTML = '<div class="welcome"><div class="wave">👋</div><b>হ্যালো বলুন!</b><span>এই chat-এ প্রথম মেসেজ পাঠান।</span></div>';
     return;
@@ -523,6 +533,7 @@ function renderMessages() {
     const day = dayLabel(m.createdAt);
     if (day !== lastDay) { html += `<div class="day"><span>${day}</span></div>`; lastDay = day; prev = null; }
 
+    if (chatQuery && m.type === "text" && !(m.text || "").toLowerCase().includes(chatQuery)) continue;
     if (m.type === "call" || m.type === "system") {
       html += `<div class="call-log">${m.type === "call" ? "📞 " : ""}${esc(m.text)}${m.type === "call" ? " · " + timeOf(m.createdAt) : ""}</div>`;
       prev = null;
@@ -535,7 +546,7 @@ function renderMessages() {
       ? `<div class="quote"><b>${esc(m.replyTo.name)}</b><span>${esc(m.replyTo.text)}</span></div>` : "";
     const img = !m.deleted && m.image ? `<img class="msg-img" src="${m.image}" alt="ছবি" loading="lazy">` : "";
     const body = m.deleted ? "<i>🚫 মেসেজটি মুছে ফেলা হয়েছে</i>"
-      : m.type === "voice" ? `<div class="voice"><audio controls preload="metadata" src="${m.audio}"></audio></div>`
+      : m.type === "voice" ? voiceHtml(m)
       : (m.text ? `<p>${linkify(m.text)}</p>` : "");
     const sn = active?.isGroup && !mine && m.senderName ? `<div class="sname">${esc(m.senderName)}</div>` : "";
     const edited = m.edited && !m.deleted ? '<span class="edited">সম্পাদিত</span>' : "";
@@ -557,6 +568,7 @@ function renderMessages() {
   box.querySelectorAll(".msg-img").forEach(img => {
     img.onclick = e => { e.stopPropagation(); openLightbox(img.src); };
   });
+  box.querySelectorAll(".vp").forEach(b => b.onclick = e => { e.stopPropagation(); toggleVoice(b); });
   box.querySelectorAll("audio").forEach(a => {
     a.onclick = e => e.stopPropagation();
     a.onplay = () => box.querySelectorAll("audio").forEach(o => { if (o !== a) o.pause(); });
@@ -1050,18 +1062,19 @@ const WALL_LABEL = { aurora: "অরোরা", dusk: "গোধূলি", mint
 function applyWall(name, img) {
   const st = document.documentElement.style;
   if (img) {
-    st.setProperty("--wl", `url("${img}") center/cover no-repeat`);
-    st.setProperty("--wd", `linear-gradient(rgba(8,8,20,.6),rgba(8,8,20,.7)), url("${img}") center/cover no-repeat`);
+    st.setProperty("--chat-wl", `url("${img}") center/cover no-repeat`);
+    st.setProperty("--chat-wd", `linear-gradient(rgba(8,8,20,.6),rgba(8,8,20,.7)), url("${img}") center/cover no-repeat`);
   } else {
     const w = WALLS[name] || WALLS.aurora;
-    st.setProperty("--wl", w.l);
-    st.setProperty("--wd", w.d);
+    st.setProperty("--chat-wl", w.l);
+    st.setProperty("--chat-wd", w.d);
   }
   localStorage.setItem("rikuu_wall", img ? "custom" : (WALLS[name] ? name : "aurora"));
   if (img) localStorage.setItem("rikuu_wall_img", img); else localStorage.removeItem("rikuu_wall_img");
 }
 function loadWall() {
-  const name = localStorage.getItem("rikuu_wall") || "aurora";
+  const name = localStorage.getItem("rikuu_wall") || "";
+  if (!name) return;
   const img = localStorage.getItem("rikuu_wall_img");
   if (name === "custom" && img) applyWall("aurora", img); else applyWall(name);
 }
@@ -1170,6 +1183,7 @@ async function openGroup(gid) {
     $("typing").hidden = true;
     $("audioBtn").hidden = true;
     $("videoBtn").hidden = true;
+    refreshHeaderPrefs();
     listenMessages();
     clearUnread(active.uid);
     renderRecent();
@@ -1177,6 +1191,87 @@ async function openGroup(gid) {
   } catch (e) {
     toast(errText(e));
   }
+}
+
+function refreshHeaderPrefs() {
+  closeChatSearch();
+  if (!active) return;
+  const p = prefs();
+  $("pinBtn").classList.toggle("on", !!(p.pin || {})[active.uid]);
+  $("muteBtn").textContent = (p.mute || {})[active.uid] ? "🔕" : "🔔";
+  $("muteBtn").classList.toggle("on", !!(p.mute || {})[active.uid]);
+}
+function closeChatSearch() {
+  chatSearchQ = "";
+  $("csInput").value = "";
+  $("chatSearch").hidden = true;
+}
+function togglePin() {
+  if (!active) return;
+  setPref("pin", active.uid, !(prefs().pin || {})[active.uid]);
+  refreshHeaderPrefs();
+  renderRecent();
+  toast((prefs().pin || {})[active.uid] ? "চ্যাট উপরে পিন করা হয়েছে" : "পিন সরানো হয়েছে");
+}
+function toggleMute() {
+  if (!active) return;
+  const on = !(prefs().mute || {})[active.uid];
+  setPref("mute", active.uid, on);
+  refreshHeaderPrefs();
+  toast(on ? "এই চ্যাটের নোটিফিকেশন বন্ধ" : "নোটিফিকেশন চালু");
+}
+
+/* ---------- voice player ---------- */
+const voiceSrc = {};
+let playing = { a: null, el: null };
+function voiceHtml(m) {
+  voiceSrc[m.key] = m.audio;
+  const bars = Array.from({ length: 24 }, (_, i) =>
+    `<i style="--h:${6 + Math.round((Math.sin(i * 1.3) + 1) * 9)}px;--d:${(-i * 0.06).toFixed(2)}s"></i>`).join("");
+  return `<div class="voice" data-k="${esc(m.key)}"><button class="vp" aria-label="চালান">▶</button><div class="wave">${bars}</div><span class="vd">${fmtDur(m.duration || 0)}</span></div>`;
+}
+function stopVoiceUI() {
+  if (playing.el) {
+    playing.el.classList.remove("play");
+    const b = playing.el.querySelector(".vp");
+    if (b) b.textContent = "▶";
+  }
+  playing = { a: null, el: null };
+}
+function toggleVoice(btn) {
+  const wrap = btn.closest(".voice"), k = wrap.dataset.k;
+  if (playing.el === wrap && playing.a) { playing.a.pause(); stopVoiceUI(); return; }
+  if (playing.a) { playing.a.pause(); stopVoiceUI(); }
+  const a = new Audio(voiceSrc[k]);
+  playing = { a, el: wrap };
+  wrap.classList.add("play");
+  btn.textContent = "❚❚";
+  a.onended = stopVoiceUI;
+  a.play().catch(() => { toast("ভয়েস চালানো যায়নি"); stopVoiceUI(); });
+}
+
+/* ---------- mute & chat search ---------- */
+function isMuted(id) {
+  try { return JSON.parse(localStorage.getItem("rikuu_mute") || "[]").includes(id); } catch (_) { return false; }
+}
+function toggleMute() {
+  if (!active) return;
+  const set = new Set(JSON.parse(localStorage.getItem("rikuu_mute") || "[]"));
+  if (set.has(active.uid)) set.delete(active.uid); else set.add(active.uid);
+  localStorage.setItem("rikuu_mute", JSON.stringify([...set]));
+  refreshMute();
+  toast(isMuted(active.uid) ? "চ্যাট মিউট করা হয়েছে" : "মিউট বন্ধ হয়েছে");
+}
+function refreshMute() {
+  $("muteBtn").textContent = active && isMuted(active.uid) ? "🔕" : "🔔";
+}
+let chatQuery = "";
+function toggleChatSearch(force) {
+  const bar = $("chatSearch");
+  const show = typeof force === "boolean" ? force : bar.hidden;
+  bar.hidden = !show;
+  if (show) $("chatQ").focus();
+  else { chatQuery = ""; $("chatQ").value = ""; renderMessages(); }
 }
 
 function hideChat() {
@@ -1196,6 +1291,15 @@ applyTheme();
 
 loadWall();
 $("wallBtn").onclick = openWall;
+$("searchBtn").onclick = () => toggleChatSearch();
+$("chatQClose").onclick = () => toggleChatSearch(false);
+$("chatQ").addEventListener("input", e => { chatQuery = e.target.value.trim().toLowerCase(); renderMessages(); });
+$("muteBtn").onclick = toggleMute;
+$("pinBtn").onclick = togglePin;
+$("muteBtn").onclick = toggleMute;
+$("findBtn").onclick = () => { $("chatSearch").hidden = false; $("csInput").focus(); };
+$("csInput").addEventListener("input", e => { chatSearchQ = e.target.value; renderMessages(); });
+$("csClose").onclick = () => { closeChatSearch(); renderMessages(); };
 $("groupBtn").onclick = openGroupModal;
 $("homeGroup").onclick = openGroupModal;
 $("homeFind").onclick = () => $("search").focus();

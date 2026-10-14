@@ -109,11 +109,24 @@
           <span id="headStatus"></span>
         </div>
         <div class="head-actions">
+          <button id="pinBtn" class="icon-btn" title="চ্যাট পিন করুন" aria-label="পিন">📌</button>
+          <button id="muteBtn" class="icon-btn" title="নোটিফিকেশন বন্ধ/চালু" aria-label="মিউট">🔔</button>
+          <button id="findBtn" class="icon-btn" title="মেসেজ খুঁজুন" aria-label="খুঁজুন">🔍</button>
+          <button id="searchBtn" class="icon-btn" title="মেসেজ খুঁজুন" aria-label="খুঁজুন">🔎</button>
+          <button id="muteBtn" class="icon-btn" title="মিউট" aria-label="মিউট">🔔</button>
           <button id="audioBtn" class="icon-btn" title="অডিও কল" aria-label="অডিও কল">📞</button>
           <button id="videoBtn" class="icon-btn" title="ভিডিও কল" aria-label="ভিডিও কল">🎥</button>
         </div>
       </header>
 
+      <div id="chatSearch" class="chat-search" hidden>
+        <input id="csInput" placeholder="এই চ্যাটে মেসেজ খুঁজুন…" aria-label="মেসেজ খুঁজুন">
+        <button id="csClose" class="icon-btn" aria-label="বন্ধ">✕</button>
+      </div>
+      <div id="chatSearch" class="chat-search" hidden>
+        <input id="chatQ" placeholder="এই চ্যাটে মেসেজ খুঁজুন…">
+        <button id="chatQClose" class="icon-btn" aria-label="বন্ধ করুন">✕</button>
+      </div>
       <div id="messages" class="messages"></div>
 
       <div id="typing" class="typing" hidden>
